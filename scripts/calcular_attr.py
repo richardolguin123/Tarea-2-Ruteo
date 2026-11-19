@@ -119,10 +119,14 @@ def main():
             p = np.array([pf.get(int(i), 0.0) for i in aristas[:, 0]])
             rng = np.random.default_rng(a.semilla)
             vals, todos_l, mayor = [], [], []
+            i_stgo = [c[1] for c in claves].index("Santiago")
+            con_stgo = np.zeros(len(claves))           # veces que cada nodo clave sigue conectado con Santiago
             for _ in range(a.n):
                 activa = rng.random(len(p)) >= p      # True = el enlace sobrevive
-                m = metricas_estado(componentes(aristas, n_vert, activa), vert_claves)
+                et = componentes(aristas, n_vert, activa)
+                m = metricas_estado(et, vert_claves)
                 vals.append(m["attr"]); todos_l.append(m["todos_conectados"]); mayor.append(m["claves_en_mayor"])
+                con_stgo += et[vert_claves] == et[vert_claves[i_stgo]]
             valor, todos, n_sim = float(np.mean(vals)), float(np.mean(todos_l)), a.n
             err = 1.96 * float(np.std(vals, ddof=1)) / np.sqrt(a.n)
             print(f"\nESCENARIO: sismo (Monte Carlo, n={a.n}, semilla={a.semilla})")
@@ -131,6 +135,10 @@ def main():
             print(f"  Nodos clave conectados a la mayor componente (prom.) : {np.mean(mayor):.2f} de {len(claves)}")
             print(f"  P(todos los nodos clave conectados)                  : {todos:.4f}")
             print(f"  ATTR (post-sismo) = {valor:.4f}   (IC95% +/- {err:.4f})")
+            print("\n  Probabilidad de seguir conectado con Santiago despues del sismo:")
+            for i in np.argsort(con_stgo / a.n):
+                if i != i_stgo:
+                    print(f"    {claves[i][1]:14s} {con_stgo[i] / a.n:.4f}")
 
         cur.execute("""CREATE TABLE IF NOT EXISTS red.resultados_attr(
             id serial PRIMARY KEY, fecha timestamp, escenario text, sin_puentes boolean,

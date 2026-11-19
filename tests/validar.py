@@ -218,6 +218,14 @@ def main(externo):
                               (r_d - 0.1) * 1000, (r_d + 0.1) * 1000)[0]
     check("Perimetro de dano: MMI >= VI dentro del circulo y < VI fuera", mmi_dentro >= 5.995 and mmi_fuera < 6.005,
           f"radio {r_d} km; MMI min dentro {mmi_dentro}, max fuera {mmi_fuera}")
+    # bajo MMI V el modelo extrapola las relaciones de Wald para V-VIII; se compara con las de Wald para I < V
+    dif_pgv, dif_p = 0.0, 0.0
+    for pga, pgv, lon_m, pf in q("SELECT pga_g, pgv_cm_s, longitud_m, p_falla FROM red.prob_falla WHERE mmi < 5"):
+        pgv_b = 10 ** ((2.20 * math.log10(pga * 981.0) + 1.00 - 3.40) / 2.10)
+        dif_pgv = max(dif_pgv, abs(pgv_b - pgv) / pgv)
+        dif_p = max(dif_p, abs((1 - math.exp(-0.002416 * pgv_b * lon_m / 1000)) - pf))
+    check("Bajo MMI V, usar las relaciones de Wald para I < V cambia p_falla en menos de 0,005",
+          dif_p < 0.005, f"PGV max {100 * dif_pgv:.1f} %, p_falla max {dif_p:.4f}")
     mmi_max = q1("SELECT max(mmi) FROM red.prob_falla")
     mmi_usgs = float(q1("SELECT mmi_usgs FROM sismo.evento"))
     aviso("Contraste con USGS", f"MMI maximo del modelo {mmi_max:.2f} vs MMI maximo USGS {mmi_usgs:.2f} "
@@ -233,6 +241,40 @@ def main(externo):
     for f in filas_sql:
         dif = max(dif, abs(bd[int(f[0])] - float(f[8])))
     check("Probabilidades de main.sql = las de la tabla en la BD", dif < 1e-9, f"max dif {dif:.1e}")
+    check("red.aristas.p_falla = red.prob_falla.p_falla en todas las aristas",
+          q1("SELECT count(*) FROM red.aristas a JOIN red.prob_falla f ON f.arista_id = a.id WHERE a.p_falla = f.p_falla") == n_ar)
+
+    # main.sql autocontenido: se carga con psql en una base vacia temporal y se compara con la base principal
+    base_tmp = "prueba_main_sql"
+    adm = ca.psycopg.connect(host=os.getenv("PGHOST", "127.0.0.1"), port=int(os.getenv("PGPORT", "5433")),
+                             dbname="postgres", user=os.getenv("PGUSER", "postgres"),
+                             password=os.getenv("PGPASSWORD", "postgres"), autocommit=True)
+    adm.execute(f"DROP DATABASE IF EXISTS {base_tmp}")
+    adm.execute(f"CREATE DATABASE {base_tmp}")
+    try:
+        r_psql = subprocess.run(["docker", "exec", "-i", os.getenv("CONTENEDOR_BD", "ruteo_tarea2_db"), "psql", "-q",
+                                 "-U", os.getenv("PGUSER", "postgres"), "-d", base_tmp, "-v", "ON_ERROR_STOP=1", "-f", "-"],
+                                input=(RAIZ / "main.sql").read_bytes(), capture_output=True)
+        with ca.psycopg.connect(host=os.getenv("PGHOST", "127.0.0.1"), port=int(os.getenv("PGPORT", "5433")),
+                                dbname=base_tmp, user=os.getenv("PGUSER", "postgres"),
+                                password=os.getenv("PGPASSWORD", "postgres")) as c2:
+            cuenta = lambda s: c2.execute(s).fetchone()[0]  # noqa: E731
+            conteos = (cuenta("SELECT count(*) FROM red.aristas"), cuenta("SELECT count(*) FROM red.aristas_vertices_pgr"),
+                       cuenta("SELECT count(*) FROM red.nodos_clave"), cuenta("SELECT count(*) FROM red.prob_falla"),
+                       cuenta("SELECT count(*) FROM sismo.evento"), cuenta("SELECT count(*) FROM sismo.zonas"))
+            esperados = (n_ar, q1("SELECT count(*) FROM red.aristas_vertices_pgr"), 16, n_ar, 1, 2)
+            comp = cuenta("""SELECT count(DISTINCT c.component) FROM red.nodos_clave k JOIN pgr_connectedComponents(
+                             'SELECT id, source, target, longitud_m AS cost FROM red.aristas') c ON c.node = k.vertice_id""")
+            p_vacia = cuenta("SELECT round(sum(p_falla)::numeric, 6) FROM red.aristas")
+        check("main.sql se carga con psql en una base vacia (extensiones, red, nodos, sismo, zonas y probabilidades)",
+              r_psql.returncode == 0 and conteos == esperados,
+              f"psql codigo {r_psql.returncode}; filas {conteos}" + (f"; {r_psql.stderr.decode()[:200]}" if r_psql.returncode else ""))
+        check("En la base cargada desde main.sql los 16 nodos quedan conectados y las p_falla coinciden",
+              comp == 1 and float(p_vacia) == float(q1("SELECT round(sum(p_falla)::numeric, 6) FROM red.aristas")),
+              f"componentes con nodos clave: {comp}")
+    finally:
+        adm.execute(f"DROP DATABASE IF EXISTS {base_tmp}")
+        adm.close()
 
     print("G. ATTR despues del sismo (replica con otra semilla)")
     p_arr = np.array([bd.get(int(i), 0.0) for i in aristas[:, 0]])
