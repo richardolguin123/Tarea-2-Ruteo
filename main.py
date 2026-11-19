@@ -1,23 +1,26 @@
 """Tarea 2 - Resiliencia de la infraestructura de Internet de Chile frente al terremoto M8.8.
 
 Uso:
+  python main.py            # flujo completo: levanta la base si no responde (docker compose up -d),
+                            # carga la BD, calcula los ATTR antes y despues, y abre el mapa Leaflet
   python main.py cargar     # carga shapefiles, construye la topologia (pgRouting), carga el sismo
                             # (GeoJSON USGS), calcula las probabilidades de falla y ejecuta main.sql
   python main.py metricas   # ATTR y demas metricas de resiliencia antes/despues del sismo (ambas redes)
   python main.py attr       # (igual que metricas)
   python main.py mapa       # servidor web con el mapa Leaflet (http://127.0.0.1:5055, variable PUERTO)
-  python main.py todo       # cargar + metricas
+  python main.py todo       # cargar + metricas, sin abrir el mapa
 
-Requiere la base PostGIS/pgRouting (docker compose up -d). Conexion: PGHOST/PGPORT/PGDATABASE/
-PGUSER/PGPASSWORD (por defecto 127.0.0.1:5433, resiliencia, postgres/postgres).
+Conexion: PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD (por defecto 127.0.0.1:5433, resiliencia, postgres/postgres).
 """
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
+import psycopg
 
 RAIZ = Path(__file__).resolve().parent
 sys.path.insert(0, str(RAIZ / "scripts"))
@@ -28,6 +31,35 @@ SHP = RAIZ / "datos_crudos" / "zip_extraido" / "Respuesta_T5610"
 GEOJSON_SISMO = RAIZ / "datos_crudos" / "sismo" / "usgs_maule_2010_m88.geojson"
 PY = sys.executable
 N_SIM, N_DIST = 2000, 200
+
+
+def base_responde():
+    try:
+        with psycopg.connect(host=os.getenv("PGHOST", "127.0.0.1"), port=int(os.getenv("PGPORT", "5433")),
+                             dbname=os.getenv("PGDATABASE", "resiliencia"), user=os.getenv("PGUSER", "postgres"),
+                             password=os.getenv("PGPASSWORD", "postgres"), connect_timeout=3) as c:
+            c.execute("SELECT 1")
+        return True
+    except psycopg.Error:
+        return False
+
+
+def asegurar_base(espera_max_s=180):
+    """Si PostgreSQL no responde, levanta el contenedor con docker compose y espera a que acepte conexiones."""
+    if base_responde():
+        print("0) Base de datos: responde")
+        return
+    print("0) Base de datos: no responde, se levanta con docker compose up -d")
+    subprocess.run(["docker", "compose", "up", "-d"], cwd=RAIZ, check=True)
+    inicio = time.time()
+    seguidas = 0
+    while time.time() - inicio < espera_max_s:
+        seguidas = seguidas + 1 if base_responde() else 0
+        if seguidas == 2:      # dos respuestas seguidas: el servidor ya termino de iniciar
+            print(f"   lista en {time.time() - inicio:.0f} s")
+            return
+        time.sleep(2)
+    sys.exit("La base de datos no respondio a tiempo")
 
 
 def ejecutar_sql(ruta):
@@ -165,12 +197,18 @@ def servidor():
 
 
 if __name__ == "__main__":
-    accion = sys.argv[1] if len(sys.argv) > 1 else "mapa"
-    if accion == "cargar":
+    accion = sys.argv[1] if len(sys.argv) > 1 else "completo"
+    if accion == "completo":
+        asegurar_base()
+        cargar()
+        metricas()
+        servidor()
+    elif accion == "cargar":
         cargar()
     elif accion in ("metricas", "attr"):
         metricas(int(sys.argv[2]) if len(sys.argv) > 2 else N_SIM)
     elif accion == "todo":
+        asegurar_base()
         cargar()
         metricas()
     elif accion == "mapa":

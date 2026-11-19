@@ -27,22 +27,34 @@ queden todos conectados después del sismo es 0.
 ```bash
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt     # Windows
-docker compose up -d                              # PostGIS 3.4 + pgRouting 3.6 (puerto 5433)
 ```
 
 ## Uso
 ```bash
+python main.py
+```
+Un solo comando corre todo el flujo: si la base no responde la levanta con `docker compose up -d`
+(PostGIS 3.4 + pgRouting 3.6, puerto 5433), carga la BD, calcula el ATTR antes y después del sismo con
+las demás métricas, y abre el mapa Leaflet en http://127.0.0.1:5055.
+
+Atajos opcionales:
+```bash
 python main.py cargar    # shapefiles -> topología -> sismo (GeoJSON USGS) -> zona circular -> main.sql
 python main.py metricas  # ATTR y demás métricas del paper, antes y después del sismo (ambas redes)
-python main.py mapa      # mapa Leaflet en http://127.0.0.1:5055
-python main.py todo      # cargar + metricas
+python main.py mapa      # solo el mapa
+python main.py todo      # cargar + metricas, sin abrir el mapa
+```
+
+`main.sql` es autocontenido y también se puede cargar directo en una base vacía:
+```bash
+psql -v ON_ERROR_STOP=1 -f main.sql
 ```
 
 ## Contenido
 | Ruta | Descripción |
 |---|---|
-| `main.py` | Carga la BD, calcula el ATTR (antes/después) y sirve el mapa Leaflet |
-| `main.sql` | Probabilidad de falla de cada enlace (tabla `red.prob_falla`) |
+| `main.py` | Levanta la base si hace falta, carga la BD, calcula el ATTR (antes/después) y sirve el mapa Leaflet |
+| `main.sql` | Base autocontenida: red, nodos clave, sismo, zonas y probabilidad de falla de cada enlace (`red.prob_falla` y `red.aristas.p_falla`) |
 | `static/index.html` | Mapa Leaflet: enlaces, nodos clave, epicentro, zona circular, perímetro de daño, métricas, selector de red y simulación |
 | `scripts/cargar_shapefiles.py` | Carga las 4 capas a PostGIS |
 | `scripts/cargar_sismo.py` | Carga el GeoJSON del sismo |
@@ -50,7 +62,7 @@ python main.py todo      # cargar + metricas
 | `scripts/calcular_attr.py` | ATTR por pares (ec. 8), en operación y con Monte Carlo post-sismo |
 | `scripts/metricas_resiliencia.py` | Las cuatro métricas del paper; distancias con `pgr_dijkstraCost` |
 | `sql/` | Nodos clave, construcción de la topología y consultas de verificación |
-| `datos_crudos/` | Datos originales (shapefiles, oficio SUBTEL, GeoJSON de USGS) |
+| `datos_crudos/` | Datos originales (shapefiles de la respuesta de SUBTEL y GeoJSON de USGS) |
 
 ## Uso de cada librería
 La topología (`pgr_createTopology`) y las rutas/componentes (`pgr_dijkstra`, `pgr_connectedComponents`)
@@ -62,13 +74,14 @@ confiabilidad y mostrar el mapa:
 | `psycopg` | Conexión a PostgreSQL/PostGIS y ejecución del SQL |
 | `pyshp` | Lectura de los shapefiles para cargarlos a la BD |
 | `NumPy` | Simulación Monte Carlo y cálculos del modelo de falla |
-| `SciPy` | Componentes conexas, grado y agrupamiento de cada realización Monte Carlo (ATTR, N y demás métricas) |
+| `SciPy` | Componentes conexas, grado y agrupamiento de cada simulación Monte Carlo (ATTR, N y demás métricas) |
 | `Flask` | API y página del mapa Leaflet |
+| `Leaflet` | Dibujo del mapa en el navegador |
 | `matplotlib`, `shapely` | Figuras estáticas de la red para el informe |
 
 ## Pruebas
 ```bash
-python tests/validar.py --externo    # 49 pruebas: datos, topología, nodos, métricas, modelo, main.sql y web
+python tests/validar.py --externo    # 53 pruebas: datos, topología, nodos, métricas, modelo, main.sql y web
 ```
 
 ## Modelo de falla
