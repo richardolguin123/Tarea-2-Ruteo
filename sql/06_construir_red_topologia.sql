@@ -1,7 +1,8 @@
 -- =====================================================================
 -- Construccion de la red y su topologia (pgr_createTopology)
 -- Entrada : infra.* (4 capas de lineas)  y  red.nodos_clave
--- Salida  : red.aristas, red.aristas_vertices_pgr, red.nodos_clave.vertice_id
+-- Salida  : red.aristas (con p_falla = 0 hasta correr el modelo de falla), red.aristas_vertices_pgr,
+--           red.nodos_clave.vertice_id
 -- Pasos   : (1) lineas simples  (2) snap 56 m  (3) nodado en intersecciones
 --           (4) topologia  (5) asignar nodos clave a vertices
 --           (6) puentes inferidos entre fragmentos que contienen nodos clave
@@ -37,13 +38,16 @@ FROM (SELECT ST_Dump(ST_Node(ST_Collect(geom))) AS g FROM red.tmp_snap) d;
 CREATE TABLE red.aristas AS
 SELECT n.id, COALESCE(c.capa, 'desconocido') AS capa, 'detectado'::text AS tipo,
        ST_Length(n.geom::geography) AS longitud_m, n.geom,
-       NULL::int AS source, NULL::int AS target
+       NULL::int AS source, NULL::int AS target,
+       0.0::double precision AS p_falla
 FROM red.tmp_nodado n
 LEFT JOIN LATERAL (SELECT s.capa FROM red.tmp_snap s
                     WHERE ST_DWithin(s.geom, ST_LineInterpolatePoint(n.geom, 0.5), 0.00001)
                     ORDER BY s.prio LIMIT 1) c ON true
 WHERE ST_Length(n.geom::geography) > 0;
 ALTER TABLE red.aristas ADD PRIMARY KEY (id);
+-- probabilidad de falla de cada arista: 0 en la red en operacion; la llena scripts/modelo_falla.py
+ALTER TABLE red.aristas ALTER COLUMN p_falla SET DEFAULT 0.0, ALTER COLUMN p_falla SET NOT NULL;
 CREATE INDEX ON red.aristas USING gist(geom);
 
 -- (4) TOPOLOGIA con pgRouting (tolerancia 0.00001 grados ~ 1 m)

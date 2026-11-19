@@ -18,7 +18,12 @@ Cadena del modelo (todas las relaciones son de la literatura, ver informe, secci
   Perimetro de dano  : circulo donde el modelo da MMI >= VI (inicio de dano, escala de Wald et al. 1999).
 
 Uso: python modelo_falla.py [--fuente circular|epicentro] [--k 1.0] [--sql main.sql] [--tabla prob_falla]
-Escribe sismo.zonas (circulo de ruptura y perimetro de dano), la tabla red.<tabla> y (opcional) main.sql.
+Escribe sismo.zonas (circulo de ruptura y perimetro de dano), la tabla red.<tabla>, la columna
+red.aristas.p_falla (solo con la tabla base prob_falla) y, si se pide, main.sql.
+
+main.sql es autocontenido: crea las extensiones, los esquemas, la red (aristas, vertices y nodos clave),
+el sismo y sus zonas, y las probabilidades de falla. Se puede cargar en una base vacia con
+  psql -v ON_ERROR_STOP=1 -f main.sql
 """
 import argparse
 import math
@@ -101,6 +106,57 @@ def guardar_zonas(cur, m, h, r_fuente, r_dano):
                     (tipo, desc, round(r, 1), round(math.pi * r * r), r * 1000.0))
 
 
+# tablas que main.sql reconstruye en una base vacia: (tabla, llave primaria, indices)
+TABLAS_MAIN_SQL = [
+    ("red.nodos_clave", "id", []),
+    ("red.aristas", "id", ["USING gist(geom)", "(source)", "(target)"]),
+    ("red.aristas_vertices_pgr", "id", ["USING gist(the_geom)"]),
+    ("sismo.evento", "id_usgs", []),
+    ("sismo.zonas", "tipo", []),
+]
+
+
+def volcar_tabla(cur, f, tabla, llave, indices, por_insert=500):
+    """Escribe CREATE TABLE + INSERT de una tabla de la BD. Cada valor va como literal de texto
+    (las geometrias en EWKB hexadecimal), que PostgreSQL convierte al tipo de la columna al insertar."""
+    cur.execute("""SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+                   WHERE a.attrelid = %s::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum""",
+                (tabla,))
+    cols = cur.fetchall()
+    f.write(f"\n-- {tabla}\n")
+    defs = ",\n  ".join(f'"{c}" {tipo}' for c, tipo in cols)
+    f.write(f"CREATE TABLE {tabla}(\n  {defs},\n  PRIMARY KEY ({llave}));\n")
+    expr = ", ',', ".join(f'quote_nullable("{c}"::text)' for c, _ in cols)
+    cur.execute(f"SELECT '(' || concat({expr}) || ')' FROM {tabla} ORDER BY {llave}")
+    filas = [r[0] for r in cur.fetchall()]
+    nombres = ", ".join(f'"{c}"' for c, _ in cols)
+    for i in range(0, len(filas), por_insert):
+        f.write(f"INSERT INTO {tabla} ({nombres}) VALUES\n" + ",\n".join(filas[i:i + por_insert]) + ";\n")
+    for ix in indices:
+        f.write(f"CREATE INDEX ON {tabla} {ix};\n")
+    return len(filas)
+
+
+def escribir_main_sql(cur, ruta, cabecera, t, filas):
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(cabecera)
+        f.write("-- Autocontenido: se puede cargar en una base vacia con  psql -v ON_ERROR_STOP=1 -f main.sql\n\n")
+        f.write("SET client_min_messages = warning;\n")
+        f.write("CREATE EXTENSION IF NOT EXISTS postgis;\nCREATE EXTENSION IF NOT EXISTS pgrouting;\n")
+        f.write("CREATE SCHEMA IF NOT EXISTS red;\nCREATE SCHEMA IF NOT EXISTS sismo;\n")
+        f.write(f"DROP TABLE IF EXISTS red.{t}, " + ", ".join(x[0] for x in TABLAS_MAIN_SQL) + " CASCADE;\n")
+        f.write("\n-- 1) Red (topologia de pgr_createTopology), nodos clave, sismo y zonas\n")
+        for tabla, llave, indices in TABLAS_MAIN_SQL:
+            volcar_tabla(cur, f, tabla, llave, indices)
+        f.write(f"\n-- 2) Probabilidad de falla de cada enlace\n")
+        f.write(f"CREATE TABLE red.{t}(\n  arista_id int PRIMARY KEY, capa text, longitud_m double precision,\n"
+                "  dist_fuente_km double precision, pga_g double precision, mmi double precision,\n"
+                "  pgv_cm_s double precision, tasa_reparacion_km double precision, p_falla double precision);\n")
+        f.write(f"INSERT INTO red.{t} VALUES\n")
+        f.write(",\n".join("(%d,'%s',%s,%s,%s,%s,%s,%s,%s)" % x for x in filas) + ";\n")
+        f.write("ANALYZE red.aristas;\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fuente", choices=["circular", "epicentro"], default="circular")
@@ -139,6 +195,9 @@ def main():
             pga_g double precision, mmi double precision, pgv_cm_s double precision,
             tasa_reparacion_km double precision, p_falla double precision)""")
         cur.executemany(f"INSERT INTO red.{t} VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", filas)
+        if t == "prob_falla":   # la tabla base tambien queda en la columna p_falla de red.aristas
+            cur.execute("ALTER TABLE red.aristas ADD COLUMN IF NOT EXISTS p_falla double precision NOT NULL DEFAULT 0.0")
+            cur.execute("UPDATE red.aristas a SET p_falla = f.p_falla FROM red.prob_falla f WHERE f.arista_id = a.id")
         conn.commit()
 
         n = len(filas)
@@ -158,19 +217,14 @@ def main():
                 print(f"  {capa:7s} n={len(pc):5d}  p media={sum(pc) / len(pc):.4f}")
 
         if a.sql:
-            with open(a.sql, "w", encoding="utf-8") as f:
-                f.write("-- main.sql : probabilidades de falla de cada enlace tras el sismo M%.1f (USGS %s)\n" % (m, "official20100227063411530_30"))
-                f.write(f"-- Generado {datetime.now():%Y-%m-%d %H:%M} por scripts/modelo_falla.py  (fuente={a.fuente}, K={a.k})\n")
-                f.write(f"-- Modelo: ruptura circular Strasser 2010 (R = {r_fuente:.1f} km) -> Youngs 1997 (PGA) -> "
-                        "Wald 1999 (MMI, PGV) -> ALA 2001 (RR) -> Poisson\n")
-                f.write("-- Requiere el esquema red.aristas ya construido (sql/06_construir_red_topologia.sql)\n\n")
-                f.write(f"DROP TABLE IF EXISTS red.{t};\n")
-                f.write(f"CREATE TABLE red.{t}(\n  arista_id int PRIMARY KEY, capa text, longitud_m double precision,\n"
-                        "  dist_fuente_km double precision, pga_g double precision, mmi double precision,\n"
-                        "  pgv_cm_s double precision, tasa_reparacion_km double precision, p_falla double precision);\n")
-                f.write(f"INSERT INTO red.{t} VALUES\n")
-                f.write(",\n".join("(%d,'%s',%s,%s,%s,%s,%s,%s,%s)" % x for x in filas) + ";\n")
-            print(f"main.sql escrito: {a.sql}  ({n} filas)")
+            cabecera = (
+                "-- main.sql : red, sismo y probabilidades de falla de cada enlace tras el sismo M%.1f (USGS %s)\n"
+                % (m, "official20100227063411530_30")
+                + f"-- Generado {datetime.now():%Y-%m-%d %H:%M} por scripts/modelo_falla.py  (fuente={a.fuente}, K={a.k})\n"
+                + f"-- Modelo: ruptura circular Strasser 2010 (R = {r_fuente:.1f} km) -> Youngs 1997 (PGA) -> "
+                "Wald 1999 (MMI, PGV) -> ALA 2001 (RR) -> Poisson\n")
+            escribir_main_sql(cur, a.sql, cabecera, t, filas)
+            print(f"main.sql escrito: {a.sql}  ({n} filas de probabilidad, base autocontenida)")
 
 
 if __name__ == "__main__":
