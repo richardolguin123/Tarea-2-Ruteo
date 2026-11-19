@@ -1,0 +1,17 @@
+services:
+  db:
+    image: pgrouting/pgrouting:16-3.4-3.6.1
+    container_name: ruteo_tarea2_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: resiliencia
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ruteo_tarea2_pgdata:/var/lib/postgresql/data
+      - ./datos_crudos/zip_extraido/Respuesta_T5610:/datos:ro
+      - ./sql:/sql:ro
+
+volumes:
+  ruteo_tarea2_pgdata:

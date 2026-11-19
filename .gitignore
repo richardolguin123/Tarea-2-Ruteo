@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Registro de trabajo y material del informe (no van al repositorio)
+bitacora/
+informe/
+Informe_Tarea2.pdf
+Informe_Tarea2_Overleaf.zip
+Tarea2_Ruteo_para_comparar.zip
+
+# Oficio de SUBTEL (trae nombres de funcionarios)
+datos_crudos/pdf/
+
+# Capturas: la evidencia va en el informe (la 01 es el oficio y varias son de la primera version)
+imagenes/

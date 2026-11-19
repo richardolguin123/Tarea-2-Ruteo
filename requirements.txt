@@ -1,0 +1,7 @@
+psycopg[binary]>=3.1
+pyshp>=2.3
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+shapely>=2.0
+flask>=3.0
